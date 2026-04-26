@@ -44,6 +44,14 @@ local dev and a deployed instance.
 
    ```toml
    K8S_AGENT_WORKER_URL = "https://k8s-agent.<your-subdomain>.workers.dev"
+
+   # Required if you set AGENT_API_KEY on the Worker (recommended).
+   # Same value as `wrangler secret put AGENT_API_KEY` produced.
+   K8S_AGENT_API_KEY    = "<the-shared-secret>"
+
+   # Optional: gate the UI itself behind a password. Anyone hitting
+   # the SCC URL sees a password prompt before the form renders.
+   STREAMLIT_UI_PASSWORD = "<a-strong-passphrase>"
    ```
 
 5. Deploy. App URL looks like

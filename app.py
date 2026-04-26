@@ -27,6 +27,30 @@ DEFAULT_WORKER_URL = os.getenv(
 )
 TIMEOUT_SECONDS = 120
 
+
+def _secret(name: str, default: str = "") -> str:
+    """Read from st.secrets first (deployed), then env (local)."""
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name])
+    except (FileNotFoundError, KeyError):
+        pass
+    return os.getenv(name, default)
+
+
+# Optional shared API key for the Worker. When set on the Worker via
+# `wrangler secret put AGENT_API_KEY`, callers must send the same
+# value as `Authorization: Bearer …`. Stored in SCC's Secrets, never
+# in the public mirror.
+AGENT_API_KEY = _secret("K8S_AGENT_API_KEY")
+
+# Optional UI password gating. Renders a password prompt before the
+# tabs; once entered correctly, the session unlocks. Defense in depth
+# — without it, anyone who finds the SCC URL sees the form (still
+# can't call the Worker without AGENT_API_KEY, but no need to expose
+# the form at all).
+UI_PASSWORD = _secret("STREAMLIT_UI_PASSWORD")
+
 st.set_page_config(
     page_title="K8s Agent",
     page_icon="⎈",
@@ -45,6 +69,13 @@ if "worker_url" not in st.session_state:
 
 # ─── Helpers ──────────────────────────────────────────────────────
 
+def _auth_headers() -> dict:
+    """Authorization header for cost-bearing endpoints. Empty when
+    AGENT_API_KEY is unset (e.g. local dev against a Worker without
+    the secret)."""
+    return {"Authorization": f"Bearer {AGENT_API_KEY}"} if AGENT_API_KEY else {}
+
+
 def call_chat(message: str, mode: str) -> dict:
     """POST /chat. Returns the parsed JSON body augmented with the
     HTTP status code so the UI can surface both halves of an error
@@ -54,6 +85,7 @@ def call_chat(message: str, mode: str) -> dict:
         response = requests.post(
             url,
             json={"message": message, "mode": mode},
+            headers=_auth_headers(),
             timeout=TIMEOUT_SECONDS,
         )
     except requests.exceptions.RequestException as e:
@@ -81,10 +113,14 @@ def call_chat(message: str, mode: str) -> dict:
 def call_health() -> dict:
     """GET /health for the configured Worker. Used by the sidebar
     health-check button to confirm the URL is reachable and which
-    runner mode (http / container / unconfigured) is active."""
+    runner mode (http / container / unconfigured) is active.
+
+    /health is intentionally unauthenticated so monitoring still works
+    when the API key is wrong — but we attach the header anyway in
+    case future versions of the Worker change that policy."""
     url = f"{st.session_state.worker_url.rstrip('/')}/health"
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers=_auth_headers(), timeout=10)
         return {
             "_status": response.status_code,
             "_url": url,
@@ -102,6 +138,7 @@ def call_verify(code: str, theorem_name: str | None) -> dict:
         response = requests.post(
             f"{st.session_state.worker_url.rstrip('/')}/verify",
             json=body,
+            headers=_auth_headers(),
             timeout=TIMEOUT_SECONDS,
         )
         return response.json()
@@ -114,6 +151,7 @@ def call_generate(intent: str, max_attempts: int) -> dict:
         response = requests.post(
             f"{st.session_state.worker_url.rstrip('/')}/generate",
             json={"intent": intent, "maxAttempts": max_attempts},
+            headers=_auth_headers(),
             timeout=TIMEOUT_SECONDS,
         )
         return response.json()
@@ -278,6 +316,37 @@ with st.sidebar:
     st.divider()
 
     st.caption("**Tabs above** let you also hit `/verify` and `/generate` directly.")
+
+
+# ─── Password gate ────────────────────────────────────────────────
+#
+# Only renders when STREAMLIT_UI_PASSWORD is set in secrets. Defense
+# in depth — without it, anyone with the SCC URL sees the form (they
+# still can't call the Worker without K8S_AGENT_API_KEY, but we'd
+# rather not even surface the form to randoms).
+
+if UI_PASSWORD:
+    if "ui_unlocked" not in st.session_state:
+        st.session_state.ui_unlocked = False
+
+    if not st.session_state.ui_unlocked:
+        st.title("⎈ K8s Agent")
+        st.caption("Enter the access password to continue.")
+        with st.form("ui_password_form", clear_on_submit=True):
+            attempt = st.text_input(
+                "Password",
+                type="password",
+                label_visibility="collapsed",
+                placeholder="Password",
+            )
+            submitted = st.form_submit_button("Unlock", use_container_width=True)
+        if submitted:
+            if attempt == UI_PASSWORD:
+                st.session_state.ui_unlocked = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+        st.stop()
 
 
 # ─── Tabs ─────────────────────────────────────────────────────────
